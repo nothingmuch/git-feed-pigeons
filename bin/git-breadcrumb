@@ -1,0 +1,90 @@
+#!/bin/sh
+
+set -e
+
+OPTIONS_SPEC="\
+git breadcrumb [--trail=<ref> [<object>]]
+--
+trail= 		also write to refs/breadcrumbs/trail/<ref>
+"
+
+. "$(git --exec-path)/git-sh-setup"
+require_work_tree
+set_reflog_action breadcrumb
+
+
+prefix="refs/breadcrumbs"
+
+# next, figure where HEAD is pointing to if it's a symbolic ref
+branch=$(git rev-parse --symbolic-full-name HEAD)
+
+# TODO allow specifying object via arg
+breadcrumb=HEAD
+
+# see if there are working changes on top of HEAD
+created_stash=$(git stash create)
+if [ -n "$created_stash" ]; then
+   #echo "created stash $created_stash"
+   breadcrumb=$created_stash
+fi
+
+
+for trail in HEAD "$branch"; do # TODO --trail arg too
+   ref="$prefix/$trail"
+
+   #echo "leaving trail in $prefix/$trail"
+
+   if git rev-parse --verify --quiet "$ref" > /dev/null; then
+      #echo "  it already exists"
+
+      if [ "$( git rev-parse "$ref" )" = "$( git rev-parse $breadcrumb )" ]; then
+	 # skip if it's already up to date (same commit)
+	 #echo "    it's up to date ($ref == $breadcrumb)"
+	 continue
+      elif [ "$breadcrumb" != "HEAD" ]; then
+	 # compare trees, in case these are stashes with identical trees
+	 unset different
+
+	 for spec in "" "^" "^2"; do
+	    #echo "    comparing trees of $ref$spec and $breadcrumb$spec"
+	    if git rev-parse --verify --quiet "$ref$spec" >/dev/null && git rev-parse --verify --quiet "$breadcrumb$spec" >/dev/null && \
+	       git diff-tree --no-patch --exit-code "$ref$spec" "$breadcrumb$spec"; then
+	       true #echo "      they're the same"
+	    else
+	       #echo "      they're different"
+	       different=yes
+	       break
+	    fi
+	 done
+
+	 # skip if all trees are the same (already stashed this working directory
+	 # and index state, but commit is different. reuse the old one)
+	 if [ -z "$different" ]; then
+	    #echo "    they were the same"
+	    if [ "$trail" = "HEAD" ]; then
+	       #echo "    setting breadcrumb=$ref to propagate to other trails"
+	       breadcrumb="$ref"
+	    fi
+	    continue
+	 #else
+	    #echo "    they were different"
+	 fi
+      fi
+   fi
+
+   # ensure breadcrumb reflog exists, these are tracked liked stashes
+   reflog=$(git rev-parse --git-path "logs/$ref")
+   mkdir -p "$(dirname "$reflog")"
+   touch "$reflog"
+
+   # write the ref
+   #echo "  updating $ref = $breadcrumb"
+   git update-ref -m "leaving breadcrumb" "$ref" "$breadcrumb"
+
+   if [ "$trail" = "HEAD" ]; then
+      #echo "setting breadcrumb=$ref"
+      breadcrumb="$ref"
+   fi
+done
+
+exec git rev-parse $breadcrumb
